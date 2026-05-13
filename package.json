@@ -13,7 +13,7 @@
     "jsonwebtoken": "^9.0.2",
     "jspdf": "^3.0.3",
     "jspdf-autotable": "^5.0.2",
-    "next": "15.5.4",
+    "next": "15.5.18",
     "papaparse": "^5.5.3",
     "pdfkit": "^0.17.2",
     "qrcode": "^1.5.4",
