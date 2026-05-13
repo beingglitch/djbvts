@@ -5,6 +5,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../../lib/prisma";
 import { buildReportPdf } from "../../../../lib/report-pdf";
 import { ensureUserByEmail } from "../../../../lib/users";
+import { requireAuth, errorResponse } from "../../../../lib/auth";
 
 // Force dynamic rendering for this API route
 export const dynamic = 'force-dynamic';
@@ -120,18 +121,24 @@ function buildSummary(rows: Array<{
 
 export async function POST(req: NextRequest) {
   try {
-    const { dateFrom, dateTo, generatedByEmail, filters = {} as Filters } = await req.json();
-    const normalizedFilters = normalizeFilters(filters);
+    const claims = requireAuth(req);
+    const generatorEmail = await ensureUserByEmail(claims.email);
 
-    if (!dateFrom || !dateTo) {
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    const { dateFrom, dateTo, filters = {} as Filters } = body as {
+      dateFrom?: unknown;
+      dateTo?: unknown;
+      filters?: Filters;
+    };
+
+    if (typeof dateFrom !== "string" || typeof dateTo !== "string" || !dateFrom || !dateTo) {
       return NextResponse.json({ error: "dateFrom and dateTo are required" }, { status: 400 });
     }
 
-    if (!generatedByEmail) {
-      return NextResponse.json({ error: "generatedByEmail is required" }, { status: 400 });
-    }
-
-    const generatorEmail = await ensureUserByEmail(generatedByEmail);
+    const normalizedFilters = normalizeFilters(filters);
 
     const where = buildWhereClause(dateFrom, dateTo, normalizedFilters);
 
@@ -220,19 +227,14 @@ export async function POST(req: NextRequest) {
       recordCount: rows.length,
     });
   } catch (error: any) {
+    if (error?.name === "AuthError") {
+      return errorResponse(error);
+    }
     console.error("Failed to generate PDF", error);
     const status = typeof error?.statusCode === "number" ? error.statusCode : 500;
     const message = status === 400 && error?.message ? error.message : "Failed to generate PDF";
     return NextResponse.json({ error: message }, { status });
   }
-}
-
-/**
- * Convert YYYY-MM-DD to DD-MM-YYYY format for comparison
- */
-function convertToComparableFormat(isoDate: string): string {
-  const [year, month, day] = isoDate.split("-");
-  return `${day}-${month}-${year}`;
 }
 
 /**
@@ -245,18 +247,10 @@ function parseDDMMYYYY(dateStr: string): Date | null {
   return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
 }
 
-function buildWhereClause(dateFrom: string, dateTo: string, filters: NormalizedFilters): Prisma.ReportWhereInput {
+function buildWhereClause(_dateFrom: string, _dateTo: string, filters: NormalizedFilters): Prisma.ReportWhereInput {
+  // Date range filtering happens in memory after fetching because reportDate is
+  // stored as a DD-MM-YYYY string and can't be range-compared lexicographically.
   const clauses: Prisma.ReportWhereInput[] = [];
-
-  // Convert ISO dates to DD-MM-YYYY for comparison
-  const fromDateDDMMYYYY = convertToComparableFormat(dateFrom);
-  const toDateDDMMYYYY = convertToComparableFormat(dateTo);
-
-  // For date range filtering with DD-MM-YYYY format, we need to fetch all records
-  // and filter them in memory, or we can use a raw query
-  // For now, we'll apply date filtering after fetching
-  // clauses.push({ reportDate: { gte: fromDateDDMMYYYY } });
-  // clauses.push({ reportDate: { lte: toDateDDMMYYYY } });
 
   if (filters.vehicles.length > 0) {
     clauses.push({ vehicleNo: { in: filters.vehicles } });

@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "../../../../lib/prisma";
 import { ensureUserByEmail } from "../../../../lib/users";
+import { requireAuth, errorResponse } from "../../../../lib/auth";
 
 type ParsedRow = {
   vehicleNo: string;
@@ -297,39 +298,47 @@ async function parseWorkbook(file: File): Promise<ParsedRow[]> {
   return allRecords;
 }
 
-export async function GET(_req: NextRequest) {
-  const records = await prisma.report.findMany({
-    orderBy: [
-      { vehicleNo: "asc" },
-      { reportDate: "asc" },
-    ],
-  });
-
-  return NextResponse.json(records);
+export async function GET(req: NextRequest) {
+  try {
+    requireAuth(req);
+    const records = await prisma.report.findMany({
+      orderBy: [
+        { vehicleNo: "asc" },
+        { reportDate: "asc" },
+      ],
+    });
+    return NextResponse.json(records);
+  } catch (error) {
+    return errorResponse(error, "Failed to load reports");
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const claims = requireAuth(req);
+    const uploaderEmail = await ensureUserByEmail(claims.email);
     const contentType = req.headers.get("content-type") ?? "";
 
     if (contentType.includes("application/json")) {
-      const payload = await req.json();
-      const { records: rawRecords, record: singleRecord, uploadedBy } = payload;
-      if (!uploadedBy) {
-        return NextResponse.json({ error: "uploadedBy is required" }, { status: 400 });
+      const payload = await req.json().catch(() => null);
+      if (!payload || typeof payload !== "object") {
+        return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
       }
+      const { records: rawRecords, record: singleRecord } = payload as {
+        records?: unknown;
+        record?: unknown;
+      };
 
-      const uploaderEmail = await ensureUserByEmail(uploadedBy);
-
-      if (singleRecord) {
+      if (singleRecord && typeof singleRecord === "object") {
+        const r = singleRecord as Record<string, unknown>;
         const normalizedRecord: ParsedRow = {
-          vehicleNo: String(singleRecord.vehicleNo ?? "").trim(),
-          area: String(singleRecord.area ?? "").trim(),
-          tankerType: String(singleRecord.tankerType ?? "").trim(),
-          transporterName: String(singleRecord.transporterName ?? "").trim(),
-          reportDate: normaliseDate(singleRecord.reportDate) ?? "",
-          tripDistanceKm: toDistanceString(singleRecord.tripDistanceKm),
-          tripCount: toTripCount(singleRecord.tripCount),
+          vehicleNo: String(r.vehicleNo ?? "").trim(),
+          area: String(r.area ?? "").trim(),
+          tankerType: String(r.tankerType ?? "").trim(),
+          transporterName: String(r.transporterName ?? "").trim(),
+          reportDate: normaliseDate(r.reportDate) ?? "",
+          tripDistanceKm: toDistanceString(r.tripDistanceKm),
+          tripCount: toTripCount(r.tripCount),
         };
 
         if (!normalizedRecord.vehicleNo) {
@@ -372,14 +381,17 @@ export async function POST(req: NextRequest) {
 
       const snapshotCode = randomBytes(16).toString("hex");
 
-      const rows: ParsedRow[] = rawRecords
-        .map((r: ParsedRow) => ({
-          ...r,
-          reportDate: normaliseDate(r.reportDate) ?? "",
-          tripDistanceKm: toDistanceString(r.tripDistanceKm),
-          tripCount: toTripCount(r.tripCount),
+      const rows: ParsedRow[] = (rawRecords as ParsedRow[])
+        .map((r) => ({
+          vehicleNo: String(r?.vehicleNo ?? "").trim(),
+          area: String(r?.area ?? "").trim(),
+          tankerType: String(r?.tankerType ?? "").trim(),
+          transporterName: String(r?.transporterName ?? "").trim(),
+          reportDate: normaliseDate(r?.reportDate) ?? "",
+          tripDistanceKm: toDistanceString(r?.tripDistanceKm),
+          tripCount: toTripCount(r?.tripCount),
         }))
-        .filter((r) => r.reportDate);
+        .filter((r) => r.reportDate && r.vehicleNo);
 
       if (rows.length === 0) {
         return NextResponse.json({ error: "No valid rows to save" }, { status: 400 });
@@ -396,14 +408,9 @@ export async function POST(req: NextRequest) {
 
     const formData = await req.formData();
     const file = formData.get("file");
-    const uploadedBy = formData.get("uploadedBy");
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Missing XLSX file" }, { status: 400 });
-    }
-
-    if (typeof uploadedBy !== "string" || !uploadedBy.trim()) {
-      return NextResponse.json({ error: "uploadedBy is required" }, { status: 400 });
     }
 
     const parsedRows = await parseWorkbook(file);
@@ -415,7 +422,6 @@ export async function POST(req: NextRequest) {
     const snapshotCode = randomBytes(16).toString("hex");
     const fileName = file.name ?? "uploaded.xlsx";
 
-    const uploaderEmail = await ensureUserByEmail(uploadedBy);
     const savedRows = await persistRows(parsedRows, uploaderEmail, snapshotCode, fileName);
     return NextResponse.json({
       success: true,
@@ -424,6 +430,9 @@ export async function POST(req: NextRequest) {
       records: savedRows,
     });
   } catch (error: any) {
+    if (error?.name === "AuthError") {
+      return errorResponse(error);
+    }
     console.error("Failed to save data", error);
     const status = typeof error?.statusCode === "number" ? error.statusCode : 500;
     const message = status === 400 && error?.message ? error.message : "Failed to save data";
@@ -433,31 +442,38 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    const { id, record, updatedBy } = await req.json();
+    const claims = requireAuth(req);
+    const updaterEmail = await ensureUserByEmail(claims.email);
 
-    if (!id || !record) {
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    const { id, record } = body as { id?: unknown; record?: unknown };
+
+    if (typeof id !== "string" || !id || !record || typeof record !== "object") {
       return NextResponse.json({ error: "id and record are required" }, { status: 400 });
     }
+    const r = record as Record<string, unknown>;
 
     const existing = await prisma.report.findUnique({ where: { id } });
     if (!existing) {
       return NextResponse.json({ error: "Report not found" }, { status: 404 });
     }
 
-    const updaterEmail = updatedBy ? await ensureUserByEmail(updatedBy) : existing.uploadedBy;
-    const nextReportDate = normaliseDate(record.reportDate ?? existing.reportDate);
+    const nextReportDate = normaliseDate(r.reportDate ?? existing.reportDate);
     if (!nextReportDate) {
       return NextResponse.json({ error: "Valid reportDate is required" }, { status: 400 });
     }
 
     const updateData = {
-      vehicleNo: String(record.vehicleNo ?? existing.vehicleNo).trim(),
-      area: String(record.area ?? existing.area).trim(),
-      tankerType: String(record.tankerType ?? existing.tankerType).trim(),
-      transporterName: String(record.transporterName ?? existing.transporterName).trim(),
+      vehicleNo: String(r.vehicleNo ?? existing.vehicleNo).trim(),
+      area: String(r.area ?? existing.area).trim(),
+      tankerType: String(r.tankerType ?? existing.tankerType).trim(),
+      transporterName: String(r.transporterName ?? existing.transporterName).trim(),
       reportDate: nextReportDate,
-      tripDistanceKm: toDistanceString(record.tripDistanceKm ?? existing.tripDistanceKm),
-      tripCount: toTripCount(record.tripCount ?? existing.tripCount),
+      tripDistanceKm: toDistanceString(r.tripDistanceKm ?? existing.tripDistanceKm),
+      tripCount: toTripCount(r.tripCount ?? existing.tripCount),
       uploadedBy: updaterEmail,
       uploadedAt: new Date(),
     };
@@ -469,6 +485,9 @@ export async function PATCH(req: NextRequest) {
 
     return NextResponse.json({ success: true, record: updatedRecord });
   } catch (error: any) {
+    if (error?.name === "AuthError") {
+      return errorResponse(error);
+    }
     if (error?.code === "P2002") {
       return NextResponse.json(
         { error: "A report already exists for the selected vehicle and date" },
@@ -484,14 +503,20 @@ export async function PATCH(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
-    const { id } = await req.json();
-    if (!id) {
+    requireAuth(req);
+
+    const body = await req.json().catch(() => null);
+    const id = body && typeof body === "object" ? (body as Record<string, unknown>).id : null;
+    if (typeof id !== "string" || !id) {
       return NextResponse.json({ error: "id is required" }, { status: 400 });
     }
 
     const deleted = await prisma.report.delete({ where: { id } });
     return NextResponse.json({ success: true, record: deleted });
   } catch (error: any) {
+    if (error?.name === "AuthError") {
+      return errorResponse(error);
+    }
     if (error?.code === "P2025") {
       return NextResponse.json({ error: "Report not found" }, { status: 404 });
     }

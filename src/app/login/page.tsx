@@ -43,7 +43,7 @@ export default function LoginPage() {
       }
 
       localStorage.setItem("accessToken", payload.accessToken);
-      localStorage.setItem("userEmail", email.trim());
+      localStorage.setItem("userEmail", payload.email ?? email.trim().toLowerCase());
 
       router.replace("/");
     } catch (err) {

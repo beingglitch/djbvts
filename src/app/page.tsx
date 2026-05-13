@@ -59,6 +59,28 @@ const formFromRow = (row: ReportRow): ReportRowForm => ({
   tripCount: row.tripCount != null ? String(row.tripCount) : "",
 });
 
+/**
+ * Wrapper around fetch that attaches the bearer token from localStorage.
+ * On 401, clears the stored credentials and routes back to /login.
+ */
+async function authedFetch(
+  router: ReturnType<typeof useRouter>,
+  input: RequestInfo,
+  init: RequestInit = {}
+): Promise<Response> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
+  const headers = new Headers(init.headers ?? {});
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  const res = await fetch(input, { ...init, headers });
+  if (res.status === 401 && typeof window !== "undefined") {
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("userEmail");
+    router.replace("/login");
+  }
+  return res;
+}
+
 export default function ReportsPage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
@@ -160,7 +182,7 @@ export default function ReportsPage() {
           return;
         }
       }
-      const res = await fetch("/api/reports/data");
+      const res = await authedFetch(router, "/api/reports/data");
       if (res.ok) {
         const records = (await res.json()) as ReportRow[];
         setData(records);
@@ -342,10 +364,10 @@ export default function ReportsPage() {
     setSaving(true);
     setFormError(null);
     try {
-      const res = await fetch("/api/reports/data", {
+      const res = await authedFetch(router, "/api/reports/data", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: row.id, deletedBy: userEmail }),
+        body: JSON.stringify({ id: row.id }),
       });
 
       if (!res.ok) {
@@ -410,10 +432,10 @@ export default function ReportsPage() {
 
     try {
       const deletePromises = Array.from(selectedRows).map((id) =>
-        fetch("/api/reports/data", {
+        authedFetch(router, "/api/reports/data", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, deletedBy: userEmail }),
+          body: JSON.stringify({ id }),
         })
       );
 
@@ -518,16 +540,16 @@ export default function ReportsPage() {
       let res: Response;
 
       if (editingRowId) {
-        res = await fetch("/api/reports/data", {
+        res = await authedFetch(router, "/api/reports/data", {
           method: "PATCH",
           headers,
-          body: JSON.stringify({ id: editingRowId, record: payload, updatedBy: userEmail }),
+          body: JSON.stringify({ id: editingRowId, record: payload }),
         });
       } else {
-        res = await fetch("/api/reports/data", {
+        res = await authedFetch(router, "/api/reports/data", {
           method: "POST",
           headers,
-          body: JSON.stringify({ record: payload, uploadedBy: userEmail }),
+          body: JSON.stringify({ record: payload }),
         });
       }
 
@@ -601,9 +623,8 @@ export default function ReportsPage() {
       setUploading(true);
       const formData = new FormData();
       formData.append("file", selectedFile);
-      formData.append("uploadedBy", userEmail);
 
-      const res = await fetch("/api/reports/data", {
+      const res = await authedFetch(router, "/api/reports/data", {
         method: "POST",
         body: formData,
       });
@@ -688,13 +709,12 @@ export default function ReportsPage() {
         return `${year}-${month}-${day}`;
       };
 
-      const res = await fetch("/api/reports/generate", {
+      const res = await authedFetch(router, "/api/reports/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           dateFrom: formatDateForAPI(rangeStart),
           dateTo: formatDateForAPI(rangeEnd),
-          generatedByEmail: userEmail,
           filters: {
             vehicles: selectedVehicles,
             area: selectedArea,
@@ -703,11 +723,14 @@ export default function ReportsPage() {
         })
       });
 
-      if (!res.ok) throw new Error("PDF generation failed");
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.error || "PDF generation failed");
+      }
 
       const data = await res.json();
-      
-      // Download PDF
+
+      // PDF download endpoint is public (QR verification flow), no auth needed
       const pdfRes = await fetch(data.pdfUrl);
       if (!pdfRes.ok) {
         throw new Error("Unable to download PDF");
