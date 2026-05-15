@@ -166,15 +166,27 @@ export async function POST(req: NextRequest) {
 
     const generatedAt = new Date();
     const verificationCode = randomBytes(8).toString("hex");
-    const reportCardEnv = (process.env.REPORT_CARD_URL ?? process.env.NEXT_PUBLIC_REPORT_CARD_URL ?? "")
-      .trim()
-      .replace(/\/$/, "");
+    const normalizeReportCardUrl = (raw: string | undefined): string | null => {
+      if (!raw) return null;
+      let url = raw.trim().replace(/\/+$/, "");
+      if (!url) return null;
+      if (!/^https?:\/\//i.test(url)) {
+        url = `https://${url}`;
+      }
+      if (!/\.html(\?|$)/i.test(url)) {
+        url = `${url}/report-card.html`;
+      }
+      return url;
+    };
 
     const defaultReportCard = process.env.NODE_ENV === "production"
       ? "https://djbvtswatsoo.com/report-card.html"
       : "http://localhost:3000/report-card.html";
 
-    const reportCardBase = (reportCardEnv || defaultReportCard).replace(/\/$/, "");
+    const reportCardBase =
+      normalizeReportCardUrl(process.env.REPORT_CARD_URL) ??
+      normalizeReportCardUrl(process.env.NEXT_PUBLIC_REPORT_CARD_URL) ??
+      defaultReportCard;
 
     const verificationUrl = `${reportCardBase}?code=${encodeURIComponent(verificationCode)}`;
 
